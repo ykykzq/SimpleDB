@@ -26,12 +26,14 @@ public class HeapPage implements Page {
     final int numSlots;
 
     byte[] oldData;
+    private TransactionId preMarkId;
+    private boolean isDirty;
     private final Byte oldDataLock= (byte) 0;
 
     /**
      * Create a HeapPage from a set of bytes of data read from disk.
-     * The format of a HeapPage is a set of header bytes indicating
-     * the slots of the page that are in use, some number of tuple slots.
+     * The format of a HeapPage is a set of headr bytes indicating
+     *      * ethe slots of the page that are in use, some number of tuple slots.
      *  Specifically, the number of tuples is equal to: <p>
      *          floor((BufferPool.getPageSize()*8) / (tuple size * 8 + 1))
      * <p> where tuple size is the size of tuples in this
@@ -47,6 +49,8 @@ public class HeapPage implements Page {
     public HeapPage(HeapPageId id, byte[] data) throws IOException {
         this.pid = id;
         this.td = Database.getCatalog().getTupleDesc(id.getTableId());
+        isDirty = false;
+        preMarkId = null;
         this.numSlots = getNumTuples();
         DataInputStream dis = new DataInputStream(new ByteArrayInputStream(data));
 
@@ -54,7 +58,7 @@ public class HeapPage implements Page {
         header = new byte[getHeaderSize()];
         for (int i=0; i<header.length; i++)
             header[i] = dis.readByte();
-        
+
         tuples = new Tuple[numSlots];
         try{
             // allocate and read the actual records of this page
@@ -69,13 +73,11 @@ public class HeapPage implements Page {
     }
 
     /** Retrieve the number of tuples on this page.
-        @return the number of tuples on this page
-    */
-    private int getNumTuples() {        
+     @return the number of tuples on this page
+     */
+    private int getNumTuples() {
         // some code goes here
-        int tupleSize = this.td.getSize();
-        int bufferPoolPageSize = BufferPool.getPageSize();
-        return (int) Math.floor((bufferPoolPageSize * 8.0) / (tupleSize * 8.0 + 1.0));
+        return (int) Math.floor((BufferPool.getPageSize() * 8.0) / (td.getSize() * 8.0 + 1.0));
 
     }
 
@@ -83,15 +85,15 @@ public class HeapPage implements Page {
      * Computes the number of bytes in the header of a page in a HeapFile with each tuple occupying tupleSize bytes
      * @return the number of bytes in the header of a page in a HeapFile with each tuple occupying tupleSize bytes
      */
-    private int getHeaderSize() {        
-        
+    private int getHeaderSize() {
+
         // some code goes here
-        return (int) Math.ceil(this.numSlots / 8.0);
-                 
+        return (int) Math.ceil(getNumTuples() / 8.0);
+
     }
-    
+
     /** Return a view of this page before it was modified
-        -- used by recovery */
+     -- used by recovery */
     public HeapPage getBeforeImage(){
         try {
             byte[] oldDataRef = null;
@@ -107,11 +109,11 @@ public class HeapPage implements Page {
         }
         return null;
     }
-    
+
     public void setBeforeImage() {
         synchronized(oldDataLock)
         {
-        oldData = getPageData().clone();
+            oldData = getPageData().clone();
         }
     }
 
@@ -119,7 +121,7 @@ public class HeapPage implements Page {
      * @return the PageId associated with this page.
      */
     public HeapPageId getId() {
-    // some code goes here
+        // some code goes here
         return this.pid;
     }
 
@@ -204,7 +206,7 @@ public class HeapPage implements Page {
                 Field f = tuples[i].getField(j);
                 try {
                     f.serialize(dos);
-                
+
                 } catch (IOException e) {
                     e.printStackTrace();
                 }
@@ -251,6 +253,18 @@ public class HeapPage implements Page {
      * @param t The tuple to delete
      */
     public void deleteTuple(Tuple t) throws DbException {
+        if(t==null || !td.equals(t.getTupleDesc())){
+            throw new DbException("the TupleDesc of t is mismatch!--HeapPage");
+        }
+        int slotId = t.getRecordId().getTupleNumber();
+        if(slotId < 0 || slotId>= tuples.length || tuples[slotId] == null || !isSlotUsed(slotId)){
+            throw new DbException("slot is already null");
+        }
+        if(!tuples[slotId].equals(t)){
+            throw new DbException("no exist tuple error!");
+        }
+        markSlotUsed(slotId,false);
+        tuples[slotId] = null;
         // some code goes here
         // not necessary for lab1
     }
@@ -265,6 +279,19 @@ public class HeapPage implements Page {
     public void insertTuple(Tuple t) throws DbException {
         // some code goes here
         // not necessary for lab1
+        if(t==null || !td.equals(t.getTupleDesc())){
+            throw new DbException("the TupleDesc of t is mismatch!--HeapPage");
+        }
+        for(int i=0;i<numSlots;i++){
+            if(!isSlotUsed(i)&&tuples[i]==null){
+                markSlotUsed(i,true);
+                final RecordId recordId = new RecordId(pid, i);
+                t.setRecordId(recordId);
+                tuples[i]=t;
+                return;
+            }
+        }
+        throw new DbException("the page is full!--HeapPage");
     }
 
     /**
@@ -273,7 +300,10 @@ public class HeapPage implements Page {
      */
     public void markDirty(boolean dirty, TransactionId tid) {
         // some code goes here
-	// not necessary for lab1
+        // not necessary for lab1
+        this.isDirty = dirty;
+        if(dirty == false)preMarkId = null;
+        else preMarkId = tid;
     }
 
     /**
@@ -281,8 +311,9 @@ public class HeapPage implements Page {
      */
     public TransactionId isDirty() {
         // some code goes here
-	// Not necessary for lab1
-        return null;      
+        // Not necessary for lab1
+
+        return preMarkId;
     }
 
     /**
@@ -290,28 +321,24 @@ public class HeapPage implements Page {
      */
     public int getNumEmptySlots() {
         // some code goes here
-        int numEmptySlots = 0;
-        for (int i = 0; i < this.numSlots; i++) {
-            if (!this.getSlot(i)) {
-                numEmptySlots++;
+        int res = 0;
+        for (int i = 0; i < numSlots; i ++ ) {
+            if ((header[i / 8] >> (i % 8) & 1) == 0) {
+                res ++;
             }
         }
-        return numEmptySlots;
+        return res;
     }
-    public boolean getSlot(int i) {
-        return (this.header[i / 8] & (1 << (i % 8))) != 0;
-    }
+
     /**
      * Returns true if associated slot on this page is filled.
      */
     public boolean isSlotUsed(int i) {
         // some code goes here
-        // 计算在header中的位置
-        int iTh = i / 8;
-        // 计算具体在bitmap中的位置
-        int bitTh = i % 8;
-        int onBit = (header[iTh] >> bitTh) & 1;
-        return onBit == 1;
+        int index = i / 8;
+        int loc = i % 8;
+        int x = header[index]&(1<<loc);
+        return x == (1<<loc);
     }
 
     /**
@@ -320,6 +347,13 @@ public class HeapPage implements Page {
     private void markSlotUsed(int i, boolean value) {
         // some code goes here
         // not necessary for lab1
+        int ith = i / 8;
+        int mask = 1<<(i%8);
+        if(value){
+            header[ith] = (byte)(header[ith] | mask);
+        }else{
+            header[ith] = (byte)(header[ith] & (~mask));
+        }
     }
 
     /**
@@ -328,22 +362,15 @@ public class HeapPage implements Page {
      */
     public Iterator<Tuple> iterator() {
         // some code goes here
-        List<Tuple> tupleList = new ArrayList<>();
-        // 判断是否在empty slots
-        for(int i = 0; i < numSlots ;i++){
-            if(isSlotUsed(i)) tupleList.add(tuples[i]);
-        }
-        return tupleList.iterator();
-    }
-
-    public int getNumUnusedSlots() {
-        int cnt = 0;
-        for(int i=0;i<numSlots;++i){
-            if(!isSlotUsed(i)){
-                ++cnt;
+        List<Tuple> tuples = new ArrayList<>();
+        int num = getNumTuples();
+        for (int i = 0; i < num; i++) {
+            if (isSlotUsed(i)) {
+                tuples.add(this.tuples[i]);
             }
         }
-        return cnt;
+        return tuples.iterator();
     }
+
 }
 

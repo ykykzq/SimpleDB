@@ -7,6 +7,7 @@ import simpledb.execution.SeqScan;
 import simpledb.storage.*;
 import simpledb.transaction.Transaction;
 
+import java.io.IOException;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
@@ -24,6 +25,14 @@ public class TableStats {
     private static final ConcurrentMap<String, TableStats> statsMap = new ConcurrentHashMap<>();
 
     static final int IOCOSTPERPAGE = 1000;
+    private int ioCostPerPage;
+
+    private ConcurrentHashMap<Integer, IntHistogram> intHistograms;
+
+    private ConcurrentHashMap<Integer, StringHistogram> strHistograms;
+    private  HeapFile dbFile;
+    private TupleDesc td;
+    private int totalTuples;
 
     public static TableStats getTableStats(String tablename) {
         return statsMap.get(tablename);
@@ -87,6 +96,74 @@ public class TableStats {
         // necessarily have to (for example) do everything
         // in a single scan of the table.
         // some code goes here
+        Map<Integer, Integer> minMap = new HashMap<>();
+        Map<Integer, Integer> maxMap = new HashMap<>();
+        this.intHistograms = new ConcurrentHashMap<>();
+        this.strHistograms = new ConcurrentHashMap<>();
+        this.dbFile = (HeapFile)Database.getCatalog().getDatabaseFile(tableid);
+        this.ioCostPerPage = ioCostPerPage;
+        this.td = dbFile.getTupleDesc();
+
+        Transaction tx = new Transaction();
+        tx.start();
+        DbFileIterator child = dbFile.iterator(tx.getId());
+
+        try {
+            child.open();
+            while (child.hasNext()) {
+                this.totalTuples++;
+                Tuple tuple = child.next();
+                for (int i = 0; i < td.numFields(); i++) {
+                    if (td.getFieldType(i).equals(Type.INT_TYPE)) {
+                        //Int类型，需要先统计各个属性的最大最小值
+                        IntField field = (IntField) tuple.getField(i);
+                        //最小值
+                        minMap.put(i, Math.min(minMap.getOrDefault(i, Integer.MAX_VALUE), field.getValue()));
+                        //最大值
+                        maxMap.put(i, Math.max(maxMap.getOrDefault(i, Integer.MIN_VALUE), field.getValue()));
+                    } else if(td.getFieldType(i).equals(Type.STRING_TYPE)){
+                        StringHistogram histogram = this.strHistograms.getOrDefault(i, new StringHistogram(NUM_HIST_BINS));
+                        StringField field = (StringField) tuple.getField(i);
+                        histogram.addValue(field.getValue());
+                        this.strHistograms.put(i, histogram);
+                    }
+                }
+            }
+            // 根据最大最小值构造直方图
+            for (int i = 0; i < td.numFields(); i++) {
+                if (minMap.get(i) != null) {
+                    //初始化构造int型直方图
+                    this.intHistograms.put(i, new IntHistogram(NUM_HIST_BINS, minMap.get(i), maxMap.get(i)));
+                }
+            }
+            // 重新扫描表，往Int直方图添加数据
+            child.rewind();
+            while (child.hasNext()) {
+                Tuple tuple = child.next();
+                //填充直方图的数据
+                for (int i = 0; i < td.numFields(); i++) {
+                    if (td.getFieldType(i).equals(Type.INT_TYPE)) {
+                        IntField f = (IntField) tuple.getField(i);
+                        IntHistogram intHis = this.intHistograms.get(i);
+                        if (intHis == null) throw new IllegalArgumentException("获得直方图失败！！");
+                        intHis.addValue(f.getValue());
+                        this.intHistograms.put(i, intHis);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }finally {
+            child.close();
+            try {
+                tx.commit();
+            } catch (IOException e) {
+                System.out.println("事务提交失败！！");
+            }
+
+        }
+
+
     }
 
     /**
@@ -103,7 +180,7 @@ public class TableStats {
      */
     public double estimateScanCost() {
         // some code goes here
-        return 0;
+        return dbFile.numPages() * ioCostPerPage * 2;
     }
 
     /**
@@ -117,7 +194,7 @@ public class TableStats {
      */
     public int estimateTableCardinality(double selectivityFactor) {
         // some code goes here
-        return 0;
+        return (int) ( totalTuples * selectivityFactor);
     }
 
     /**
@@ -132,7 +209,12 @@ public class TableStats {
      * */
     public double avgSelectivity(int field, Predicate.Op op) {
         // some code goes here
-        return 1.0;
+        if (td.getFieldType(field).equals(Type.INT_TYPE)) {
+            return intHistograms.get(field).avgSelectivity();
+        }else if(td.getFieldType(field).equals(Type.STRING_TYPE)){
+            return strHistograms.get(field).avgSelectivity();
+        }
+        return -1.00;
     }
 
     /**
@@ -150,7 +232,14 @@ public class TableStats {
      */
     public double estimateSelectivity(int field, Predicate.Op op, Field constant) {
         // some code goes here
-        return 1.0;
+        if (td.getFieldType(field).equals(Type.INT_TYPE)) {
+            IntField intField = (IntField) constant;
+            return intHistograms.get(field).estimateSelectivity(op,intField.getValue());
+        } else if(td.getFieldType(field).equals(Type.STRING_TYPE)){
+            StringField stringField = (StringField) constant;
+            return strHistograms.get(field).estimateSelectivity(op,stringField.getValue());
+        }
+        return -1.00;
     }
 
     /**
@@ -158,7 +247,7 @@ public class TableStats {
      * */
     public int totalTuples() {
         // some code goes here
-        return 0;
+        return totalTuples;
     }
 
 }

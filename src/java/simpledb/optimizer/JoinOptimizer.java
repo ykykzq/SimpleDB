@@ -130,7 +130,7 @@ public class JoinOptimizer {
             // HINT: You may need to use the variable "j" if you implemented
             // a join algorithm that's more complicated than a basic
             // nested-loops join.
-            return -1.0;
+            return cost1 + card1 * cost2 + card1 * card2;
         }
     }
 
@@ -176,6 +176,19 @@ public class JoinOptimizer {
                                                    Map<String, Integer> tableAliasToId) {
         int card = 1;
         // some code goes here
+        if(joinOp == Predicate.Op.EQUALS){
+            if (t1pkey && !t2pkey) {
+                card = card2;
+            } else if (!t1pkey && t2pkey) {
+                card = card1;
+            } else if (t1pkey && t2pkey) {
+                card = Math.min(card1, card2);
+            } else {
+                card = Math.max(card1, card2);
+            }
+        } else {
+            card = (int) (0.3 * card1 * card2);
+        }
         return card <= 0 ? 1 : card;
     }
 
@@ -238,6 +251,31 @@ public class JoinOptimizer {
 
         // some code goes here
         //Replace the following
+        CostCard bestCostCard = new CostCard();
+        PlanCache planCache = new PlanCache();
+        for (int i = 1; i <= joins.size(); i++) {
+            Set<Set<LogicalJoinNode>> subsets = enumerateSubsets(joins, i);
+            for (Set<LogicalJoinNode> set : subsets) {
+                double bestCostSoFar = Double.MAX_VALUE;
+                bestCostCard = new CostCard();
+                for (LogicalJoinNode logicalJoinNode : set) {
+                    CostCard costCard = computeCostAndCardOfSubplan(stats, filterSelectivities, logicalJoinNode, set, bestCostSoFar, planCache);
+                    if (costCard == null) continue;
+                    bestCostSoFar = costCard.cost;
+                    bestCostCard = costCard;
+                }
+                if (bestCostSoFar != Double.MAX_VALUE) {
+                    planCache.addPlan(set, bestCostCard.cost, bestCostCard.card, bestCostCard.plan);
+                }
+            }
+        }
+        if (explain){
+            printJoins(bestCostCard.plan, planCache, stats, filterSelectivities);
+        }
+
+        if(bestCostCard.plan != null){
+            return bestCostCard.plan;
+        }
         return joins;
     }
 

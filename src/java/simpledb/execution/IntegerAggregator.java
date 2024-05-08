@@ -17,34 +17,18 @@ import simpledb.storage.TupleIterator;
 public class IntegerAggregator implements Aggregator {
 
     private static final long serialVersionUID = 1L;
-    private int gbfield;
-    private Type gbfieldtype;
+    private int groupByIndex;
+    private Type groupByType;
     private int afield;
     private Op aggOp;
     private Map<Field, List<Field>> group;
     private TupleDesc tupleDesc;
 
 
-    /**
-     * Aggregate constructor
-     *
-     * @param gbfield
-     *            the 0-based index of the group-by field in the tuple, or
-     *            NO_GROUPING if t
-     *            here is no grouping
-     * @param gbfieldtype
-     *            the type of the group by field (e.g., Type.INT_TYPE), or null
-     *            if there is no grouping
-     * @param afield
-     *            the 0-based index of the aggregate field in the tuple
-     * @param what
-     *            the aggregation operator
-     */
-
     public IntegerAggregator(int gbfield, Type gbfieldtype, int afield, Op what) {
         // some code goes here
-        this.gbfield = gbfield;
-        this.gbfieldtype = gbfieldtype;
+        this.groupByIndex = gbfield;
+        this.groupByType = gbfieldtype;
         this.afield = afield;
         this.aggOp = what;
         group  = new HashMap<>();
@@ -71,8 +55,8 @@ public class IntegerAggregator implements Aggregator {
         // some code goes here
         final Field aggField = tup.getField(afield);
         Field groupField = null;
-        if(gbfield != -1){
-            groupField = tup.getField(gbfield);
+        if(groupByIndex != -1){
+            groupField = tup.getField(groupByIndex);
         }
         if(group.containsKey(groupField)){
             group.get(groupField).add(aggField);
